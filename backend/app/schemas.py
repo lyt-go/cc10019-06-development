@@ -343,6 +343,26 @@ class TagSnapshotEntry(BaseModel):
     retention_days: int = Field(30, description="保留天数")
 
 
+# ========== 快照导入记录 ==========
+class SnapshotImportEntry(BaseModel):
+    """快照文件导入记录：同一份文件（内容指纹相同）只产生一条记录。"""
+
+    id: int
+    status: str = "校验中"
+    pending: bool = True
+    abnormal: bool = False
+    import_id: str = Field(..., description="导入批次编号")
+    file_hash: str = Field(..., description="文件内容指纹，幂等键")
+    snapshot_id: str = Field("", description="来源快照编号")
+    snapshot_date: str = Field("", description="快照日期")
+    card_id: str = Field("", description="恢复出的画像卡片编号")
+    tag_count: int = Field(0, description="文件中的标签数量")
+    segment_count: int = Field(0, description="文件中的分群数量")
+    imported_tag_ids: list[str] = Field(default_factory=list, description="注册到标签列表的导入标签编号")
+    field_mapping: dict[str, Any] = Field(default_factory=dict, description="实际使用的字段对应关系")
+    error: str = Field("", description="校验失败原因")
+
+
 # ========== 行为热力 ==========
 class BehaviorHeatmapEntry(BaseModel):
     """热力配置：定义行为热力图分析的配置。"""

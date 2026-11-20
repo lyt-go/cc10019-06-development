@@ -26,6 +26,26 @@
       <strong>{{ selectedItem.name || selectedItem.label }}</strong> — 状态：{{ selectedItem.status }}
       <div style="margin-top:4px;">{{ selectedItem.logs || '暂无日志' }}</div>
     </div>
+    <h3 class="section-title">快照记录与快照文件</h3>
+    <p class="page-desc">快照文件携带建档时的标签定义字段和分群统计数据，可导入接收方的画像卡片重建历史统计。</p>
+    <table class="data-table" data-testid="snapshot-file-table">
+      <thead>
+        <tr><th>快照编号</th><th>快照日期</th><th>用户基数</th><th>标签数量</th><th>分群数量</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="row in snapshotRows" :key="row.snapshot_id" :data-testid="`snapshot-${row.snapshot_id}`">
+          <td>{{ row.snapshot_id }}</td>
+          <td>{{ row.snapshot_date }}</td>
+          <td>{{ row.user_count }}</td>
+          <td>{{ row.tag_count }}</td>
+          <td>{{ row.segment_count }}</td>
+          <td>
+            <button class="link" type="button" :data-testid="`export-file-${row.snapshot_id}`" @click="exportSnapshotFile(row)">导出快照文件</button>
+          </td>
+        </tr>
+        <tr v-if="!snapshotRows.length"><td colspan="6" class="empty-state">暂无快照记录</td></tr>
+      </tbody>
+    </table>
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate"><h3>登记快照记录</h3>
         <label v-for="field in columns.slice(0,3)" :key="field" class="create-field"><span>{{ field }}</span><input v-model="createValues[field]" :placeholder="`请输入${field}`" required /></label>
@@ -41,6 +61,7 @@
 import { onMounted, ref } from 'vue'
 import { request } from '@/api/client'
 const ENDPOINT = '/api/tag_snapshot'
+const SNAP_API = '/api/tag-snapshot'
 const columns = ["快照编号", "快照日期", "用户基数", "标签数量", "分群数量", "快照路径", "存储格式", "保留天数"]
 const actions = ["创建快照", "确认完成", "标记过期"]
 const timelineItems = ref<any[]>([])
@@ -49,6 +70,7 @@ const dateFrom = ref(''); const dateTo = ref('')
 const errorMessage = ref(''); const showCreate = ref(false)
 const createValues = ref<Record<string,string>>({})
 const allItems = ref<any[]>([])
+const snapshotRows = ref<any[]>([])
 function barLeft(item: any) { const all = allItems.value.filter(i => i.start && i.end); if(!all.length) return 0; const min = Math.min(...all.map(i => new Date(i.start).getTime())); const max = Math.max(...all.map(i => new Date(i.end).getTime())); const range = max - min || 86400000; return ((new Date(item.start).getTime() - min) / range) * 100 }
 function barWidth(item: any) { const all = allItems.value.filter(i => i.start && i.end); if(!all.length) return 20; const min = Math.min(...all.map(i => new Date(i.start).getTime())); const max = Math.max(...all.map(i => new Date(i.end).getTime())); const range = max - min || 86400000; return Math.max(5, ((new Date(item.end).getTime() - new Date(item.start).getTime()) / range) * 100) }
 function selectItem(item: any) { selectedItem.value = selectedItem.value?.id === item.id ? null : item }
@@ -66,5 +88,10 @@ async function submitCreate() {
   try { const res = await request(ENDPOINT, { method: 'POST', body: JSON.stringify({ values: createValues.value }) }); if(!res.ok) throw new Error('创建失败'); showCreate.value = false; await reload() } catch(e: any) { errorMessage.value = e.message }
 }
 function exportRows() { window.open(`${ENDPOINT}/export`, '_blank') }
+async function loadSnapshots() {
+  try { const res = await request(SNAP_API); const data = await res.json(); snapshotRows.value = data.items || [] } catch(e) { errorMessage.value = '快照记录加载失败' }
+}
+function exportSnapshotFile(row: any) { window.open(`${SNAP_API}/${row.snapshot_id}/export-file`, '_blank') }
 onMounted(reload)
+onMounted(loadSnapshots)
 </script>

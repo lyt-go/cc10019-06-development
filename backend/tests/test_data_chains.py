@@ -10,8 +10,9 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.store import store
+from app.seed import SEED_ROWS
 from app.services.attr_dict import list_attrs, get_attr
-from app.services.tag_define import get_tag, validate_tag_logic
+from app.services.tag_define import get_tag, update_tag, validate_tag_logic, list_imported_tags
 from app.services.tag_compute import compute_tag, get_compute_result
 from app.services.event_track import get_event
 from app.services.event_cleanse import cleanse_events, get_cleanse_result
@@ -24,9 +25,24 @@ from app.services.session_split import split_sessions, get_session_result
 from app.services.behavior_path import build_path_sankey, get_path_result
 from app.services.retention_calc import calculate_retention, get_retention_result
 from app.services.lifetime_value import predict_ltv, get_ltv_result, ltv_with_retention
-from app.services.tag_snapshot import create_snapshot, get_snapshot
+from app.services.tag_snapshot import (
+    build_snapshot_file,
+    compute_file_checksum,
+    create_snapshot,
+    get_snapshot,
+)
 from app.services.behavior_heatmap import generate_heatmap, get_heatmap
-from app.services.profile_card import build_profile_card, get_profile_result
+from app.services.profile_card import (
+    build_profile_card,
+    change_card_status,
+    get_profile_result,
+)
+from app.services.snapshot_import import (
+    import_snapshot_file,
+    list_import_records,
+    get_import_record,
+    validate_snapshot_file,
+)
 from app.services.tag_drill import drill_tag, get_drill_result
 
 
@@ -314,6 +330,200 @@ class TestBusinessLogic(unittest.TestCase):
             result["result_count"],
             max(result["users_a_count"], result["users_b_count"])
         )
+
+
+class TestSnapshotExportImport(unittest.TestCase):
+    """标签快照文件导出 → 画像卡片导入恢复的链路。"""
+
+    def setUp(self) -> None:
+        store._artifacts.clear()
+        store._compute_cache.clear()
+        store._snapshots.clear()
+        # 还原可能被用例改写的表，保证用例互不影响
+        store._tables["tag_define"] = [dict(r) for r in SEED_ROWS["tag_define"]]
+        store._tables["profile_card"] = [dict(r) for r in SEED_ROWS["profile_card"]]
+        store._tables["snapshot_import"] = []
+
+    def _build_file(self) -> dict[str, Any]:
+        """造一份带画像数据的快照文件。"""
+        compute_tag("TC-001")
+        compute_tag("TC-002")
+        compute_segment("SEG-001")
+        return build_snapshot_file("SN-001")
+
+    def _rehash(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """改动文件内容后重算校验和，让文件本身自洽。"""
+        payload["checksum"] = compute_file_checksum(
+            {k: v for k, v in payload.items() if k != "checksum"}
+        )
+        return payload
+
+    # ========== 导出：快照文件携带标签定义字段和分群统计数据 ==========
+    def test_export_file_carries_definitions_and_segment_stats(self) -> None:
+        file_payload = self._build_file()
+        self.assertEqual(file_payload["file_type"], "tag_snapshot_export")
+        self.assertIn("checksum", file_payload)
+        # 校验和可验证
+        content = {k: v for k, v in file_payload.items() if k != "checksum"}
+        self.assertEqual(compute_file_checksum(content), file_payload["checksum"])
+        # 标签定义字段齐全（不只是编号和名称）
+        self.assertEqual(file_payload["tag_count"], len(file_payload["tags"]))
+        tag = next(t for t in file_payload["tags"] if t["tag_id"] == "TAG-001")
+        self.assertEqual(tag["tag_name"], "高活跃用户")
+        self.assertTrue(tag["compute_logic"])
+        self.assertTrue(tag["source_attrs"])
+        self.assertGreater(tag["result_count"], 0)
+        # 分群统计数据齐全
+        self.assertEqual(file_payload["segment_count"], len(file_payload["segments"]))
+        seg = next(s for s in file_payload["segments"] if s["segment_id"] == "SEG-001")
+        self.assertGreater(seg["user_count"], 0)
+        self.assertIsInstance(seg["tier_distribution"], dict)
+
+    # ========== 导入：恢复历史画像并记录字段对应关系 ==========
+    def test_import_rebuilds_profile_and_records_field_mapping(self) -> None:
+        record = import_snapshot_file(self._build_file())
+        self.assertEqual(record["status"], "导入成功")
+        card_id = record["card_id"]
+        # 卡片校验成功后启用
+        card = store.find_by_field("profile_card", "card_id", card_id)
+        self.assertEqual(card["status"], "已发布")
+        self.assertEqual(card["data_source"], "snapshot_import")
+        # 接收人员打开恢复的画像：标签定义和分群统计来自文件
+        profile = get_profile_result(card_id)
+        self.assertIsNotNone(profile)
+        tag_names = {t["tag_name"] for t in profile["display_tags"]}
+        self.assertIn("高活跃用户", tag_names)
+        seg_ids = {s["segment_id"] for s in profile["segment_info"]["segments"]}
+        self.assertIn("SEG-001", seg_ids)
+        # 实际使用的字段对应关系已记录
+        mapping = record["field_mapping"]
+        self.assertEqual(mapping["tag_fields"]["tag_name"], "tags[].tag_name")
+        self.assertEqual(mapping["segment_fields"]["user_count"], "segments[].user_count")
+
+    # ========== 文件中的历史字段含义不被当前字典改写 ==========
+    def test_imported_profile_immune_to_current_dictionary_rewrite(self) -> None:
+        record = import_snapshot_file(self._build_file())
+        card_id = record["card_id"]
+        # 当前字典改写同号标签的含义
+        update_tag("TAG-001", {"tag_name": "被改写的人群", "compute_logic": "ATTR-002 > 100"})
+        # 强制重建导入卡画像
+        store._artifacts.pop("profile_card", None)
+        profile = get_profile_result(card_id)
+        imported = next(t for t in profile["display_tags"] if t["origin_tag_id"] == "TAG-001")
+        self.assertEqual(imported["tag_name"], "高活跃用户")  # 仍是文件中的历史含义
+        # 注册进标签列表的导入标签同样保留历史含义
+        imported_row = store.find_by_field("tag_define", "tag_id", f"{record['import_id']}-TAG-001")
+        self.assertEqual(imported_row["tag_name"], "高活跃用户")
+
+    # ========== 字段/分群数据读不全的卡片不能启用 ==========
+    def test_incomplete_file_not_enabled(self) -> None:
+        broken = self._build_file()
+        # 分群统计读不全：缺 user_count / tier_distribution
+        broken["segments"] = [{"segment_id": "SEG-001", "segment_name": "高活跃核心用户"}]
+        self._rehash(broken)
+        errors = validate_snapshot_file(broken)
+        self.assertTrue(errors)
+        record = import_snapshot_file(broken)
+        self.assertEqual(record["status"], "导入失败")
+        self.assertTrue(record["error"])
+        # 卡片存在但未启用
+        card = store.find_by_field("profile_card", "card_id", record["card_id"])
+        self.assertNotEqual(card["status"], "已发布")
+        self.assertTrue(card["abnormal"])
+        # 不能构建画像，也不能通过动作启用
+        with self.assertRaises(ValueError):
+            build_profile_card(record["card_id"])
+        with self.assertRaises(ValueError):
+            change_card_status(card["id"], "已发布")
+
+    def test_tampered_checksum_rejected(self) -> None:
+        payload = self._build_file()
+        payload["tags"][0]["tag_name"] = "被篡改的名称"  # 不改校验和
+        record = import_snapshot_file(payload)
+        self.assertEqual(record["status"], "导入失败")
+        self.assertIn("校验和", record["error"])
+
+    # ========== 幂等：同一份文件重传只产生一份导入记录 ==========
+    def test_reupload_same_file_single_record(self) -> None:
+        file_payload = self._build_file()
+        first = import_snapshot_file(file_payload)
+        second = import_snapshot_file(file_payload)
+        self.assertEqual(first["import_id"], second["import_id"])
+        self.assertEqual(len(list_import_records()), 1)
+
+    def test_failed_reupload_lands_on_same_record(self) -> None:
+        broken = self._build_file()
+        # 标签少读一条，声明数量与实读不一致 → 校验失败
+        broken["tags"] = [t for t in broken["tags"] if t["tag_id"] != "TAG-001"]
+        self._rehash(broken)
+        first = import_snapshot_file(broken)
+        self.assertEqual(first["status"], "导入失败")
+        # 失败后重传同一份文件：仍落到原导入记录
+        second = import_snapshot_file(broken)
+        self.assertEqual(first["import_id"], second["import_id"])
+        self.assertEqual(len(list_import_records()), 1)
+        self.assertEqual(second["status"], "导入失败")
+
+    # ========== 同号标签：两端各指各的人群，原有卡片不换人群 ==========
+    def test_same_tag_id_two_populations_isolated(self) -> None:
+        # 接收方本地 TAG-001 的人群
+        compute_tag("TC-001")
+        local_profile = build_profile_card("PC-001")
+        local_tag = next(t for t in local_profile["display_tags"] if t["tag_id"] == "TAG-001")
+        local_count = local_tag["result_count"]
+
+        # 来源方快照文件里同一个 TAG-001 是另一人群
+        file_payload = self._build_file()
+        for tag in file_payload["tags"]:
+            if tag["tag_id"] == "TAG-001":
+                tag["tag_name"] = "来源方高活跃人群"
+                tag["result_count"] = 777
+        self._rehash(file_payload)
+        record = import_snapshot_file(file_payload)
+        self.assertEqual(record["status"], "导入成功")
+
+        # 接收端再打开本地卡片：人群和名称都没换
+        store._artifacts.pop("profile_card", None)
+        local_profile2 = get_profile_result("PC-001")
+        local_tag2 = next(t for t in local_profile2["display_tags"] if t["tag_id"] == "TAG-001")
+        self.assertEqual(local_tag2["tag_name"], "高活跃用户")
+        self.assertEqual(local_tag2["result_count"], local_count)
+        # 本地标签定义未被导入改写
+        self.assertEqual(get_tag("TAG-001")["tag_name"], "高活跃用户")
+
+        # 来源端（导入卡）显示文件中的人群
+        imported_profile = get_profile_result(record["card_id"])
+        imported_tag = next(
+            t for t in imported_profile["display_tags"] if t["origin_tag_id"] == "TAG-001"
+        )
+        self.assertEqual(imported_tag["tag_name"], "来源方高活跃人群")
+        self.assertEqual(imported_tag["result_count"], 777)
+
+    # ========== 导入标签可供新卡片引用，范围清楚 ==========
+    def test_imported_tags_selectable_for_new_cards(self) -> None:
+        file_payload = self._build_file()
+        record = import_snapshot_file(file_payload)
+        imported_tags = list_imported_tags(record["import_id"])
+        self.assertEqual(len(imported_tags), file_payload["tag_count"])
+        for tag in imported_tags:
+            self.assertEqual(tag["source"], "snapshot_import")
+            self.assertEqual(tag["import_id"], record["import_id"])
+            self.assertTrue(tag["origin_tag_id"])
+        # 从标签列表选导入字段编排新卡片
+        store.insert("profile_card", {
+            "card_id": "PC-NEW-001",
+            "card_name": "引用导入标签的新卡片",
+            "display_tags": [imported_tags[0]["tag_id"]],
+            "data_source": "tag_compute",
+            "display_style": "grid",
+            "refresh_strategy": "manual",
+            "segment_id": "",
+            "version": "v1.0",
+        })
+        profile = build_profile_card("PC-NEW-001")
+        self.assertEqual(len(profile["display_tags"]), 1)
+        self.assertEqual(profile["display_tags"][0]["tag_name"], imported_tags[0]["tag_name"])
+        self.assertEqual(profile["display_tags"][0]["compute_scope"], "snapshot_import")
 
 
 if __name__ == "__main__":

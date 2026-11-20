@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.schemas import ActionPayload, ActionResult
 from app.services.tag_define import (
     list_tags, get_tag, create_tag, update_tag, delete_tag, get_tags_by_level, validate_tag_logic,
+    list_imported_tags,
 )
 from app.store import store, query_filters
 
@@ -24,6 +25,13 @@ def index(request: Request, page: int = 1, size: int = 20) -> dict[str, Any]:
     total = len(rows)
     start = (page - 1) * size
     return {"items": rows[start : start + size], "total": total, "page": page, "size": size}
+
+
+@router.get("/imported")
+def imported(import_id: str | None = None) -> dict[str, Any]:
+    """列出快照文件导入的标签：与本地同号标签隔离，可供新卡片引用。"""
+    rows = list_imported_tags(import_id)
+    return {"items": rows, "total": len(rows)}
 
 
 @router.get("/{entry_id}")

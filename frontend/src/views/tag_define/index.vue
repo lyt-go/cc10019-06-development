@@ -56,6 +56,25 @@
       </tbody>
     </table>
 
+    <section v-if="importedTags.length" class="imported-tags" data-testid="imported-tags">
+      <h3>导入标签（来自快照文件，可供新卡片引用）</h3>
+      <p class="page-desc">导入标签编号带导入批次前缀，与本地同号标签互不影响；标签含义以快照文件为准。</p>
+      <table class="data-table">
+        <thead>
+          <tr><th>标签编号</th><th>原始编号</th><th>标签名称</th><th>快照日期</th><th>导入批次</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="tag in importedTags" :key="String(tag.tag_id)" :data-testid="`imported-${tag.tag_id}`">
+            <td>{{ tag.tag_id }}</td>
+            <td>{{ tag.origin_tag_id }}</td>
+            <td>{{ tag.tag_name }}</td>
+            <td>{{ tag.snapshot_date }}</td>
+            <td>{{ tag.import_id }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate">
         <h3>登记标签规则</h3>
@@ -100,6 +119,7 @@ const filterFields = columns.slice(0, 3)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+const importedTags = ref<Row[]>([])
 const stats = computed(() => [
   { label: metricNames[0], value: total.value },
   { label: metricNames[1], value: rows.value.filter((row) => row.status === statuses[1]).length },
@@ -184,5 +204,17 @@ async function reload() {
   }
 }
 
+async function loadImportedTags() {
+  try {
+    const response = await request('/api/tag-define/imported')
+    if (!response.ok) return
+    const payload = await response.json()
+    importedTags.value = payload.items ?? []
+  } catch (error) {
+    // 导入标签区加载失败不影响主列表
+  }
+}
+
 onMounted(reload)
+onMounted(loadImportedTags)
 </script>

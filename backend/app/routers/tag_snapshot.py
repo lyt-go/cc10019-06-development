@@ -4,9 +4,16 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from app.schemas import ActionPayload, ActionResult
-from app.services.tag_snapshot import create_snapshot, get_snapshot, compare_snapshots, list_snapshots
+from app.services.tag_snapshot import (
+    build_snapshot_file,
+    create_snapshot,
+    get_snapshot,
+    compare_snapshots,
+    list_snapshots,
+)
 from app.store import store
 
 router = APIRouter(prefix="/api/tag-snapshot", tags=["tag_snapshot"])
@@ -41,6 +48,19 @@ def create(snapshot_id: str) -> ActionResult:
         return ActionResult(ok=True, message="Created", entry=result)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/{snapshot_id}/export-file")
+def export_file(snapshot_id: str) -> JSONResponse:
+    """导出快照文件：携带标签定义字段和分群统计数据，供接收方导入画像卡片。"""
+    try:
+        file_payload = build_snapshot_file(snapshot_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return JSONResponse(
+        content=file_payload,
+        headers={"Content-Disposition": f'attachment; filename="tag_snapshot_{snapshot_id}.json"'},
+    )
 
 
 @router.get("/{snapshot_id}/result")

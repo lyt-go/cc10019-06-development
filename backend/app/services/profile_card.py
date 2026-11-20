@@ -1,4 +1,8 @@
-"""画像卡片服务：消费标签计算和分群结果，生成画像卡片数据。"""
+"""画像卡片服务：消费标签计算和分群结果，生成画像卡片数据。
+
+导入卡片（data_source=snapshot_import）的数据来自快照文件，只有导入
+校验成功才能启用；普通卡片可以引用导入标签，历史统计取自快照文件。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -6,6 +10,15 @@ from typing import Any
 from app.store import store
 from app.services.tag_compute import get_compute_result
 from app.services.user_segment import get_segment_result
+from app.services.snapshot_import import (
+    IMPORT_STATUS_OK,
+    build_imported_card_result,
+    get_import_record,
+    get_imported_tag_value,
+)
+
+# 会把卡片置为启用态的动作
+ENABLE_ACTIONS = {"已发布", "发布", "启用", "已启用"}
 
 
 def build_profile_card(card_id: str) -> dict[str, Any]:
@@ -14,12 +27,21 @@ def build_profile_card(card_id: str) -> dict[str, Any]:
     if card is None:
         raise ValueError(f"Profile card not found: {card_id}")
 
+    # 导入卡片：只能从校验成功的快照文件恢复历史数据
+    if card.get("data_source") == "snapshot_import":
+        return build_imported_card_result(card_id)
+
     display_tags = card.get("display_tags", [])
     segment_id = card.get("segment_id", "")
 
     # 获取标签计算结果
     tag_values: list[dict[str, Any]] = []
     for tag_id in display_tags:
+        # 导入标签：历史统计来自快照文件，不查当前计算任务
+        imported_value = get_imported_tag_value(tag_id)
+        if imported_value is not None:
+            tag_values.append(imported_value)
+            continue
         # 查找对应计算任务
         tasks = store.find_all_by_field("tag_compute", "tag_id", tag_id)
         for task in tasks:
@@ -63,6 +85,20 @@ def build_profile_card(card_id: str) -> dict[str, Any]:
     })
 
     return result
+
+
+def change_card_status(entry_id: int, action: str) -> dict[str, Any]:
+    """画像卡片状态流转：导入卡片只有快照文件校验成功才能启用。"""
+    card = store.find("profile_card", entry_id)
+    if card is None:
+        raise ValueError(f"Profile card not found: {entry_id}")
+    if action in ENABLE_ACTIONS and card.get("data_source") == "snapshot_import":
+        record = get_import_record(card.get("import_id", ""))
+        if record is None or record.get("status") != IMPORT_STATUS_OK:
+            raise ValueError("快照文件校验未通过，卡片不能启用")
+    updated = store.update("profile_card", entry_id, {"status": action, "pending": False})
+    assert updated is not None
+    return updated
 
 
 def _get_tag_name(tag_id: str) -> str:

@@ -43,6 +43,18 @@ def get_tags_by_level(level: str) -> list[dict[str, Any]]:
     return store.find_all_by_field("tag_define", "tag_level", level)
 
 
+def list_imported_tags(import_id: str | None = None) -> list[dict[str, Any]]:
+    """列出快照文件导入的标签。
+
+    导入标签带 source/import_id/origin_tag_id 标记，与本地同号标签
+    互不影响，可供新卡片编排时引用。
+    """
+    rows = [r for r in store.rows("tag_define") if r.get("source") == "snapshot_import"]
+    if import_id:
+        rows = [r for r in rows if r.get("import_id") == import_id]
+    return rows
+
+
 def validate_tag_logic(tag_id: str) -> dict[str, Any]:
     """校验标签计算逻辑是否引用了有效的属性。"""
     tag = get_tag(tag_id)
